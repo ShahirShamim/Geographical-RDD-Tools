@@ -1,35 +1,32 @@
-# geoRDDprep
+# 🌍 geoRDDprep
 
-**geoRDDprep** is a Python package designed to streamline the data preparation process for **Geographical Regression Discontinuity Design (GeoRDD)**. It provides efficient tools for spatial joins, polygon-to-line conversions, and implementing the Turner et al. (2014) algorithm for assigning points to boundaries.
+[![PyPI version](https://badge.fury.io/py/geoRDDprep.svg)](https://badge.fury.io/py/geoRDDprep)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
 
-## Features
+**Streamline your Geographical Regression Discontinuity Design (GeoRDD) workflow.**
 
-*   **`points_in_polygon`**: Efficiently assign points to polygons (e.g., addresses to school districts).
-*   **`turner`**: Assign points to LineStrings based on orthogonal distance criteria (Turner et al., 2014).
-*   **`poly_to_line`**: Convert Polygon geometries to LineStrings for boundary analysis.
-*   **`drop_tiny_lines`**: Filter out small, noisy line segments to improve analysis quality.
-*   **`remove_sliver`**: Clean up sliver polygons using Voronoi diagrams.
-*   **`remove_overlaps`**: Remove overlapping segments between line datasets.
+`geoRDDprep` is a powerful Python toolkit designed to take the pain out of spatial data preparation. Whether you are an economist, political scientist, or data analyst, this package helps you assign points to boundaries, clean up messy polygons, and implement rigorous spatial algorithms with ease.
 
-## Installation
+## 🚀 Why geoRDDprep?
 
-You can install the package directly from the source:
+*   **⚡️ Fast & Efficient**: Optimized spatial joins and geometric operations using `geopandas` and `shapely`.
+*   **📐 Turner Algorithm Ready**: Out-of-the-box implementation of the orthogonal distance criteria from *Turner et al. (2014)*.
+*   **🧹 Data Cleaning**: Automatically remove sliver polygons and tiny, noisy line segments that mess up your analysis.
+*   **🛠️ Easy Integration**: Works seamlessly with your existing `pandas` and `geopandas` workflows.
 
-```bash
-pip install .
-```
+## 📦 Installation
 
-Or, if you are developing:
+Install directly from PyPI:
 
 ```bash
-pip install -e .
+pip install geoRDDprep
 ```
 
-## Usage
+## 🛠️ Usage Examples
 
-### 1. Assign Points to Polygons
-
-Map addresses or other points to their respective administrative regions.
+### 1. Assign Addresses to Districts
+Map millions of points to their administrative regions in seconds.
 
 ```python
 import geopandas as gpd
@@ -37,47 +34,56 @@ from geoRDDprep import points_in_polygon
 
 # Load your data
 points = gpd.read_file("addresses.geojson")
-districts = gpd.read_file("districts.geojson")
+districts = gpd.read_file("school_districts.geojson")
 
-# Assign points to districts
-# The resulting GeoDataFrame will have columns from 'districts' suffixed with '_district'
+# 🪄 Magic happens here
 result = points_in_polygon(points, districts, suffix_name="_district")
+
+print(result.head())
 ```
 
-### 2. Prepare Boundaries (Polygons to Lines)
-
-Convert polygon boundaries into lines for distance analysis.
+### 2. The Turner Algorithm (2014)
+Assign points to boundaries only if they are within a strict orthogonal distance—crucial for valid RDD analysis.
 
 ```python
-from geoRDDprep import poly_to_line, drop_tiny_lines
+from geoRDDprep import poly_to_line, drop_tiny_lines, turner
 
-# Convert polygons to lines
+# 1. Convert polygons to boundary lines
 lines = poly_to_line(districts)
 
-# Clean up noise by dropping very short lines (e.g., < 500 meters)
+# 2. Clean up noise (remove lines < 500m)
 clean_lines = drop_tiny_lines(lines, method='length', meters=500)
+
+# 3. Match points to boundaries (within 15m)
+matched_data = turner(points, clean_lines, orth_distance=15)
+
+# Check which points passed the test
+print(matched_data['turner_pass'].value_counts())
 ```
 
-### 3. Turner Algorithm
-
-Assign points to boundaries based on distance and orthogonality.
+### 3. Clean Messy Polygons
+Got "slivers" or gaps in your map? Fix them automatically.
 
 ```python
-from geoRDDprep import turner
+from geoRDDprep import remove_sliver
 
-# Match points to the nearest boundary within 15 meters
-# 'turner_pass' column will be True if the point satisfies the criteria
-matched_data = turner(points, clean_lines, orth_distance=15)
+# Merge slivers into their largest neighbors
+clean_polygons = remove_sliver(messy_polygons, boundary_clip)
 ```
 
-## Requirements
+## 🤝 Contributing
 
-*   `geopandas`
-*   `shapely`
-*   `numpy`
-*   `pandas`
-*   `scipy`
+We love contributions!
+1.  Fork the repo.
+2.  Create a branch (`git checkout -b feature/AmazingFeature`).
+3.  Commit your changes (`git commit -m 'Add AmazingFeature'`).
+4.  Push to the branch (`git push origin feature/AmazingFeature`).
+5.  Open a Pull Request.
 
-## License
+## 📄 License
 
-[MIT License](LICENSE)
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
+
+*Built with ❤️ for the spatial data community.*
