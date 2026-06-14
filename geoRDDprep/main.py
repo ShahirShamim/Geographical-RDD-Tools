@@ -7,6 +7,19 @@ import numpy as np
 import pandas as pd
 from typing import Optional, Union, List, Tuple
 
+def _align_crs(gdf1: gpd.GeoDataFrame, gdf2: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Helper to check and align CRS between two GeoDataFrames."""
+    if gdf1.crs is None or gdf2.crs is None:
+        return gdf2
+    if gdf1.crs != gdf2.crs:
+        import warnings
+        warnings.warn(
+            f"CRS mismatch: reprojecting second GeoDataFrame from {gdf2.crs} to {gdf1.crs}.",
+            UserWarning
+        )
+        return gdf2.to_crs(gdf1.crs)
+    return gdf2
+
 def points_in_polygon(
     points_gdf: gpd.GeoDataFrame, 
     polygons_gdf: gpd.GeoDataFrame, 
@@ -24,7 +37,9 @@ def points_in_polygon(
     Returns:
         gpd.GeoDataFrame: A GeoDataFrame with points and their assigned polygon characteristics.
     """
-    # Perform spatial join with op='within'
+    polygons_gdf = _align_crs(points_gdf, polygons_gdf)
+    
+    # Perform spatial join with predicate='within'
     joined = gpd.sjoin(
         points_gdf, 
         polygons_gdf, 
@@ -33,6 +48,18 @@ def points_in_polygon(
         rsuffix=suffix_name, 
         predicate="within"
     )
+    
+    # Clean up double underscores in columns if suffix starts with an underscore
+    if suffix_name.startswith('_'):
+        double_suffix = f"_{suffix_name}"
+        rename_dict = {}
+        for col in joined.columns:
+            if col.endswith(double_suffix):
+                cleaned_name = col[:-len(double_suffix)] + suffix_name
+                rename_dict[col] = cleaned_name
+        if rename_dict:
+            joined = joined.rename(columns=rename_dict)
+            
     return joined
 
 def poly_to_line(polygon_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -54,7 +81,10 @@ def poly_to_line(polygon_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 def turner(
     points_gdf: gpd.GeoDataFrame, 
     boundaries_gdf: gpd.GeoDataFrame, 
-    **kwargs
+    *,
+    orth_distance: float = 15.0,
+    reduced: bool = True,
+    unit_crs: int = 3857
 ) -> gpd.GeoDataFrame:
     """
     Matches points to LineString boundaries based on the criteria provided in 
@@ -65,18 +95,15 @@ def turner(
     Args:
         points_gdf (gpd.GeoDataFrame): GeoDataFrame containing Point geometries.
         boundaries_gdf (gpd.GeoDataFrame): GeoDataFrame containing LineString geometries.
-        **kwargs:
-            orth_distance (float): Orthogonal distance threshold in meters. Default is 15.
-            reduced (bool): If True, returns only original columns plus result. Default is True.
-            unit_crs (int): EPSG code for metric distance calculation. Default is 3857 (Web Mercator).
+        orth_distance (float): Orthogonal distance threshold in meters. Default is 15.
+        reduced (bool): If True, returns only original columns plus result. Default is True.
+        unit_crs (int): EPSG code for metric distance calculation. Default is 3857 (Web Mercator).
 
     Returns:
         gpd.GeoDataFrame: GeoDataFrame with points and a 'turner_pass' boolean column.
     """
-    # Default parameters
-    orth_distance = kwargs.get('orth_distance', 15)
-    reduced = kwargs.get('reduced', True)
-    unit_crs = kwargs.get('unit_crs', 3857)
+    # Align CRS
+    boundaries_gdf = _align_crs(points_gdf, boundaries_gdf)
 
     # Filter for valid geometries
     pts = points_gdf[points_gdf['geometry'].geom_type == 'Point'].copy()
@@ -139,7 +166,12 @@ def turner(
 def drop_tiny_lines(
     boundaries_gdf: gpd.GeoDataFrame, 
     method: str = 'percentile', 
-    **kwargs
+    *,
+    percentile: float = 0.01,
+    num_dev: float = 2.0,
+    meters: float = 500.0,
+    reduced: bool = True,
+    unit_crs: int = 3857
 ) -> gpd.GeoDataFrame:
     """
     Filters out small LineString geometries to reduce noise.
@@ -147,19 +179,15 @@ def drop_tiny_lines(
     Args:
         boundaries_gdf (gpd.GeoDataFrame): GeoDataFrame containing LineStrings.
         method (str): Method to determine threshold ('percentile', 'number_of_std', 'length').
-        **kwargs:
-            percentile (float): Percentile threshold (0-1). Default 0.01.
-            num_dev (float): Number of standard deviations below mean. Default 2.
-            meters (float): Length threshold in meters. Default 500.
-            reduced (bool): If True, removes the temporary 'length' column. Default True.
-            unit_crs (int): EPSG code for metric calculation. Default 3857.
+        percentile (float): Percentile threshold (0-1). Default 0.01.
+        num_dev (float): Number of standard deviations below mean. Default 2.
+        meters (float): Length threshold in meters. Default 500.
+        reduced (bool): If True, removes the temporary 'length' column. Default True.
+        unit_crs (int): EPSG code for metric calculation. Default 3857.
 
     Returns:
         gpd.GeoDataFrame: Filtered GeoDataFrame.
     """
-    reduced = kwargs.get('reduced', True)
-    unit_crs = kwargs.get('unit_crs', 3857)
-    
     orig_crs = boundaries_gdf.crs
     
     # Filter for LineStrings
@@ -174,17 +202,14 @@ def drop_tiny_lines(
         lengths = bds.to_crs(unit_crs).geometry.length
 
     if method == 'percentile':
-        percentile = kwargs.get('percentile', 0.01)
         cut_off = lengths.quantile(percentile)
         mask = lengths >= cut_off
 
     elif method == 'number_of_std':
-        num_dev = kwargs.get('num_dev', 2)
         cut_off = lengths.mean() - num_dev * lengths.std()
         mask = lengths >= cut_off
 
     elif method == 'length':
-        meters = kwargs.get('meters', 500)
         cut_off = meters
         mask = lengths >= cut_off
     else:
@@ -200,7 +225,9 @@ def drop_tiny_lines(
 
 def remove_sliver(
     polygons_gdf: gpd.GeoDataFrame, 
-    boundary_gdf: gpd.GeoDataFrame
+    boundary_gdf: gpd.GeoDataFrame,
+    *,
+    id_col: Optional[str] = None
 ) -> gpd.GeoDataFrame:
     """
     Removes sliver polygons by merging them into neighbors using Voronoi diagrams.
@@ -208,17 +235,38 @@ def remove_sliver(
     Args:
         polygons_gdf (gpd.GeoDataFrame): Input polygons to clean.
         boundary_gdf (gpd.GeoDataFrame): Boundary to clip the result.
+        id_col (str, optional): Name of the column containing unique identifiers.
+                                If None, defaults to 'id' or the index name.
 
     Returns:
         gpd.GeoDataFrame: Cleaned polygons.
     """
-    id_col = 'id' if 'id' in polygons_gdf.columns else polygons_gdf.index.name or 'index'
-    
-    if polygons_gdf.crs is None:
-        area = polygons_gdf.copy()
+    # Align CRS
+    boundary_gdf = _align_crs(polygons_gdf, boundary_gdf)
+
+    if id_col is None:
+        if 'id' in polygons_gdf.columns:
+            id_col = 'id'
+        else:
+            id_col = polygons_gdf.index.name or 'index'
+
+    # If id_col is not in columns, reset index to make it a column
+    polygons_temp = polygons_gdf.copy()
+    if id_col not in polygons_temp.columns:
+        polygons_temp = polygons_temp.reset_index()
+        if polygons_gdf.index.name and polygons_gdf.index.name in polygons_temp.columns:
+            id_col = polygons_gdf.index.name
+        else:
+            id_col = 'index'
+
+    # Rename id_col to 'id' internally for consistent processing
+    polygons_temp = polygons_temp.rename(columns={id_col: 'id'})
+
+    if polygons_temp.crs is None:
+        area = polygons_temp
         clip = boundary_gdf.copy()
     else:
-        area = polygons_gdf.to_crs(4326)
+        area = polygons_temp.to_crs(4326)
         clip = boundary_gdf.to_crs(4326)
 
     # De-duplicate centroids preserving original order
@@ -264,7 +312,7 @@ def remove_sliver(
                 # Direct ID assignment from the aligned unique area row
                 voronoi_polygons.append({
                     'geometry': polygon, 
-                    'id': area_unique.iloc[point_index][id_col]
+                    'id': area_unique.iloc[point_index]['id']
                 })
                     
     voronoi_gdf = gpd.GeoDataFrame(voronoi_polygons, crs=area.crs)
@@ -297,6 +345,16 @@ def remove_sliver(
     if 'id_2' in final_output.columns:
         final_output = final_output.drop('id_2', axis=1)
         
+    # Rename 'id' back to id_col
+    final_output = final_output.rename(columns={'id': id_col})
+
+    # Restore index if it was converted from index
+    if id_col == 'index' and 'index' in final_output.columns:
+        final_output = final_output.set_index('index')
+        final_output.index.name = polygons_gdf.index.name
+    elif id_col == polygons_gdf.index.name and id_col in final_output.columns:
+        final_output = final_output.set_index(id_col)
+        
     return final_output
 
 def remove_overlaps(df1: gpd.GeoDataFrame, df2: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -310,6 +368,9 @@ def remove_overlaps(df1: gpd.GeoDataFrame, df2: gpd.GeoDataFrame) -> gpd.GeoData
     Returns:
         gpd.GeoDataFrame: df1 with overlapping segments removed.
     """
+    # Align CRS
+    df2 = _align_crs(df1, df2)
+
     if df1.empty or df2.empty:
         return df1.copy()
         

@@ -27,14 +27,14 @@ def test_points_in_polygon():
     
     res = points_in_polygon(gdf_pts, gdf_poly, suffix_name='_district')
     
-    # Column assertions
-    assert 'name__district' in res.columns
-    assert 'id__district' in res.columns
+    # Column assertions (should be single-underscore after cleanup)
+    assert 'name_district' in res.columns
+    assert 'id_district' in res.columns
     
     # Value assertions
-    assert res.loc[res['id_'] == 10, 'name__district'].values[0] == 'District A'
-    assert res.loc[res['id_'] == 20, 'name__district'].values[0] == 'District B'
-    assert np.isnan(res.loc[res['id_'] == 30, 'id__district'].values[0])
+    assert res.loc[res['id_'] == 10, 'name_district'].values[0] == 'District A'
+    assert res.loc[res['id_'] == 20, 'name_district'].values[0] == 'District B'
+    assert np.isnan(res.loc[res['id_'] == 30, 'id_district'].values[0])
 
 
 def test_poly_to_line():
@@ -155,3 +155,34 @@ def test_remove_overlaps():
     
     assert len(res) == 1
     assert res['geometry'].iloc[0].equals(LineString([(0, 0), (5, 0)]))
+
+
+def test_crs_alignment_warning():
+    boundary = LineString([(-10, 0), (10, 0)])
+    gdf_bds = gpd.GeoDataFrame({'id': [1], 'geometry': [boundary]}, crs='EPSG:4326')
+    gdf_pts = gpd.GeoDataFrame({'geometry': [Point(0, 5)]}, crs='EPSG:3857')
+    
+    # Should issue a UserWarning about CRS mismatch
+    with pytest.warns(UserWarning, match="CRS mismatch: reprojecting second GeoDataFrame"):
+        res = turner(gdf_pts, gdf_bds, orth_distance=5)
+    
+    # Should automatically align CRS to points_gdf CRS
+    assert res.crs == 'EPSG:3857'
+
+
+def test_remove_sliver_custom_id_col():
+    polys = [
+        Polygon([(3, 3), (3, 5), (5, 5), (5, 3)]),
+        Polygon([(0, 3), (0, 5), (2, 5), (2, 3)]),
+        Polygon([(3, 0), (3, 2), (5, 2), (5, 0)]),
+        Polygon([(0, 0), (0, 2), (2, 2), (2, 0)])
+    ]
+    custom_ids = [40, 20, 30, 10]
+    gdf_poly = gpd.GeoDataFrame({'district_id': custom_ids, 'geometry': polys}, crs='EPSG:4326')
+    boundary = gpd.GeoDataFrame({'geometry': [Polygon([(-1, -1), (-1, 6), (6, 6), (6, -1)])]}, crs='EPSG:4326')
+    
+    res = remove_sliver(gdf_poly, boundary, id_col='district_id')
+    assert 'district_id' in res.columns
+    assert 'id' not in res.columns
+    for cid in custom_ids:
+        assert cid in res['district_id'].values

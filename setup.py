@@ -5,7 +5,7 @@ import os
 with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()
 
-VERSION = '0.1.3'
+VERSION = '0.1.4'
 DESCRIPTION = 'Preparing data for regression discontinuity design'
 
 setup(
