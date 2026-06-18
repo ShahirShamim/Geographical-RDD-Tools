@@ -111,6 +111,72 @@ def remove_overlaps(df1: gpd.GeoDataFrame, df2: gpd.GeoDataFrame) -> gpd.GeoData
 *   **`df1`**: The GeoDataFrame containing LineStrings to clean.
 *   **`df2`**: The GeoDataFrame containing geometries to subtract.
 
+### 7. `calculate_signed_distance`
+Calculates the absolute and signed distance from points to a boundary. Points inside a treatment polygon receive a positive distance; points outside receive a negative distance.
+```python
+def calculate_signed_distance(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    treatment_gdf: gpd.GeoDataFrame,
+    *,
+    distance_col: str = 'distance',
+    signed_distance_col: str = 'signed_distance',
+    treatment_col: str = 'is_treated',
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame
+```
+*   **`points_gdf`**: Point geometries.
+*   **`boundary_gdf`**: Boundary LineString geometries.
+*   **`treatment_gdf`**: Treatment polygon geometry defining the treated area.
+*   **`distance_col`** *(keyword-only)*: Column name for absolute distance. Default `'distance'`.
+*   **`signed_distance_col`** *(keyword-only)*: Column name for signed distance. Default `'signed_distance'`.
+*   **`treatment_col`** *(keyword-only)*: Column name for the treatment indicator. Default `'is_treated'`.
+*   **`unit_crs`** *(keyword-only)*: EPSG code for metric distance calculation. Default `3857`.
+
+### 8. `extract_shared_boundaries`
+Extracts shared border lines (interfaces) between adjacent polygons in a GeoDataFrame.
+```python
+def extract_shared_boundaries(
+    gdf: gpd.GeoDataFrame,
+    *,
+    id_col: Optional[str] = None
+) -> gpd.GeoDataFrame
+```
+*   **`gdf`**: GeoDataFrame containing Polygon/MultiPolygon geometries.
+*   **`id_col`** *(keyword-only)*: Name of the ID column. If `None`, uses index.
+
+### 9. `shift_boundary_placebo`
+Shifts/translates a boundary by a specified offset in meters. Useful for generating placebo borders.
+```python
+def shift_boundary_placebo(
+    boundary_gdf: gpd.GeoDataFrame,
+    xoff: float = 0.0,
+    yoff: float = 0.0,
+    *,
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame
+```
+*   **`boundary_gdf`**: Boundary geometries.
+*   **`xoff`**: Translation offset in the X direction (meters). Default `0.0`.
+*   **`yoff`**: Translation offset in the Y direction (meters). Default `0.0`.
+*   **`unit_crs`** *(keyword-only)*: EPSG code for metric calculation. Default `3857`.
+
+### 10. `filter_by_boundary_distance`
+Filters points to only those within a specified bandwidth (distance threshold) of the boundary.
+```python
+def filter_by_boundary_distance(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    max_distance: float,
+    *,
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame
+```
+*   **`points_gdf`**: Point geometries to filter.
+*   **`boundary_gdf`**: Boundary geometries.
+*   **`max_distance`**: Maximum distance threshold (meters).
+*   **`unit_crs`** *(keyword-only)*: EPSG code for metric calculation. Default `3857`.
+
 ---
 
 ## 🛠️ Usage Examples
@@ -152,6 +218,37 @@ from geoRDDprep import remove_sliver
 
 # Merge gaps/slivers into neighbor polygons using a custom identifier column
 clean_polygons = remove_sliver(messy_polygons, boundary_clip, id_col="district_code")
+```
+
+### 4. RDD Distances, Bandwidth Filtering & Placebo Tests
+```python
+import geopandas as gpd
+from geoRDDprep import (
+    calculate_signed_distance, 
+    filter_by_boundary_distance, 
+    shift_boundary_placebo
+)
+
+# 1. Calculate absolute and signed distances to a school boundary
+# Points inside the treatment area polygon receive a positive distance; points outside are negative.
+prepared_points = calculate_signed_distance(
+    points_gdf=points,
+    boundary_gdf=clean_lines,
+    treatment_gdf=treatment_area,
+    distance_col='dist_to_border',
+    signed_distance_col='running_var',
+    treatment_col='is_treated'
+)
+
+# 2. Select a subset of points within a 1000m RDD bandwidth for local estimation
+rdd_sample = filter_by_boundary_distance(
+    points_gdf=prepared_points,
+    boundary_gdf=clean_lines,
+    max_distance=1000.0
+)
+
+# 3. Create a placebo boundary shifted by 500 meters north
+placebo_boundary = shift_boundary_placebo(clean_lines, xoff=0.0, yoff=500.0)
 ```
 
 ---

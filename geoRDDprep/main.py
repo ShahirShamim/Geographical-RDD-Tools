@@ -262,12 +262,16 @@ def remove_sliver(
     # Rename id_col to 'id' internally for consistent processing
     polygons_temp = polygons_temp.rename(columns={id_col: 'id'})
 
-    if polygons_temp.crs is None:
+    orig_crs = polygons_temp.crs
+    if orig_crs is None:
+        area = polygons_temp
+        clip = boundary_gdf.copy()
+    elif orig_crs.is_projected:
         area = polygons_temp
         clip = boundary_gdf.copy()
     else:
-        area = polygons_temp.to_crs(4326)
-        clip = boundary_gdf.to_crs(4326)
+        area = polygons_temp.to_crs(3857)
+        clip = boundary_gdf.to_crs(3857)
 
     # De-duplicate centroids preserving original order
     centroids = area.geometry.centroid
@@ -355,6 +359,9 @@ def remove_sliver(
     elif id_col == polygons_gdf.index.name and id_col in final_output.columns:
         final_output = final_output.set_index(id_col)
         
+    if orig_crs is not None and not orig_crs.is_projected:
+        final_output = final_output.to_crs(orig_crs)
+        
     return final_output
 
 def remove_overlaps(df1: gpd.GeoDataFrame, df2: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -382,3 +389,193 @@ def remove_overlaps(df1: gpd.GeoDataFrame, df2: gpd.GeoDataFrame) -> gpd.GeoData
     exploded = exploded[~exploded.is_empty]
     
     return gpd.GeoDataFrame(geometry=exploded, crs=df1.crs).reset_index(drop=True)
+
+def calculate_signed_distance(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    treatment_gdf: gpd.GeoDataFrame,
+    *,
+    distance_col: str = 'distance',
+    signed_distance_col: str = 'signed_distance',
+    treatment_col: str = 'is_treated',
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame:
+    """
+    Calculates the shortest distance and signed distance from points to a boundary.
+    Points inside the treatment area (treatment_gdf) receive a positive distance,
+    while points outside (control area) receive a negative distance.
+    
+    Args:
+        points_gdf (gpd.GeoDataFrame): GeoDataFrame containing the Point geometries.
+        boundary_gdf (gpd.GeoDataFrame): GeoDataFrame containing the boundary LineString geometries.
+        treatment_gdf (gpd.GeoDataFrame): GeoDataFrame containing the treatment polygon(s).
+        distance_col (str): Name of the column for absolute distance. Default is 'distance'.
+        signed_distance_col (str): Name of the column for signed distance. Default is 'signed_distance'.
+        treatment_col (str): Name of the column for treatment indicator. Default is 'is_treated'.
+        unit_crs (int): EPSG code for metric distance calculation. Default is 3857.
+        
+    Returns:
+        gpd.GeoDataFrame: A copy of points_gdf with distance, signed distance, and treatment indicator columns added.
+    """
+    if boundary_gdf.empty:
+        raise ValueError("boundary_gdf cannot be empty.")
+    if treatment_gdf.empty:
+        raise ValueError("treatment_gdf cannot be empty.")
+
+    # Align CRS
+    boundary_gdf = _align_crs(points_gdf, boundary_gdf)
+    treatment_gdf = _align_crs(points_gdf, treatment_gdf)
+
+    orig_crs = points_gdf.crs
+    pts = points_gdf.copy()
+    bds = boundary_gdf.copy()
+
+    if orig_crs:
+        pts = pts.to_crs(unit_crs)
+        bds = bds.to_crs(unit_crs)
+        treatment_proj = treatment_gdf.to_crs(unit_crs)
+    else:
+        treatment_proj = treatment_gdf
+
+    # Calculate distance using sjoin_nearest
+    joined = gpd.sjoin_nearest(pts, bds, how='left', distance_col=distance_col)
+    joined = joined[~joined.index.duplicated(keep='first')]
+
+    # Calculate treatment status
+    treatment_union = treatment_proj.union_all()
+    is_treated = pts.geometry.within(treatment_union)
+
+    # Compile results
+    res = points_gdf.copy()
+    res[treatment_col] = is_treated
+    res[distance_col] = joined[distance_col]
+    res[signed_distance_col] = np.where(res[treatment_col], res[distance_col], -res[distance_col])
+
+    return res
+
+def extract_shared_boundaries(
+    gdf: gpd.GeoDataFrame,
+    *,
+    id_col: Optional[str] = None
+) -> gpd.GeoDataFrame:
+    """
+    Extracts the shared boundaries (borders) between adjacent polygons in a GeoDataFrame.
+    
+    Args:
+        gdf (gpd.GeoDataFrame): GeoDataFrame containing Polygon or MultiPolygon geometries.
+        id_col (str, optional): Column name to identify polygons. If None, uses index.
+        
+    Returns:
+        gpd.GeoDataFrame: A GeoDataFrame where each row is a shared boundary segment (LineString or MultiLineString)
+                          between two adjacent polygons, with columns identifying the two neighbors.
+    """
+    if gdf.empty:
+        return gpd.GeoDataFrame(columns=['left_id', 'right_id', 'geometry'], crs=gdf.crs)
+
+    # Spatial join to find touching polygons
+    adj = gpd.sjoin(gdf, gdf, predicate='touches')
+    
+    # Filter to unique pairs where left index < right index
+    left_index = adj.index
+    right_index = adj['index_right']
+    
+    mask = left_index < right_index
+    adj_unique = adj[mask]
+
+    if adj_unique.empty:
+        return gpd.GeoDataFrame(columns=['left_id', 'right_id', 'geometry'], crs=gdf.crs)
+
+    geom_left = gdf.loc[adj_unique.index, 'geometry'].values
+    geom_right = gdf.loc[adj_unique['index_right'], 'geometry'].values
+    
+    # Vectorized intersection
+    shared_geoms = shapely.intersection(geom_left, geom_right)
+    
+    # Keep only linear components (dimension 1: LineString, MultiLineString)
+    is_linear = ~shapely.is_empty(shared_geoms) & (shapely.get_dimensions(shared_geoms) == 1)
+
+    if id_col is not None:
+        left_ids = gdf.loc[adj_unique.index, id_col].values
+        right_ids = gdf.loc[adj_unique['index_right'], id_col].values
+    else:
+        left_ids = adj_unique.index.values
+        right_ids = adj_unique['index_right'].values
+
+    result_gdf = gpd.GeoDataFrame({
+        'left_id': left_ids[is_linear],
+        'right_id': right_ids[is_linear],
+        'geometry': shared_geoms[is_linear]
+    }, crs=gdf.crs)
+
+    return result_gdf.reset_index(drop=True)
+
+def shift_boundary_placebo(
+    boundary_gdf: gpd.GeoDataFrame,
+    xoff: float = 0.0,
+    yoff: float = 0.0,
+    *,
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame:
+    """
+    Shifts/translates a boundary by a specified offset in meters.
+    Useful for creating placebo boundaries in GeoRDD analysis.
+    
+    Args:
+        boundary_gdf (gpd.GeoDataFrame): GeoDataFrame containing the boundary geometries.
+        xoff (float): Offset in the X direction (east-west) in meters.
+        yoff (float): Offset in the Y direction (north-south) in meters.
+        unit_crs (int): EPSG code for metric translation. Default is 3857.
+        
+    Returns:
+        gpd.GeoDataFrame: A new GeoDataFrame with the translated boundary in the original CRS.
+    """
+    orig_crs = boundary_gdf.crs
+    gdf_temp = boundary_gdf.copy()
+    if orig_crs:
+        gdf_temp = gdf_temp.to_crs(unit_crs)
+        
+    gdf_temp['geometry'] = gdf_temp['geometry'].translate(xoff=xoff, yoff=yoff)
+    
+    if orig_crs:
+        gdf_temp = gdf_temp.to_crs(orig_crs)
+        
+    return gdf_temp
+
+def filter_by_boundary_distance(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    max_distance: float,
+    *,
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame:
+    """
+    Filters points to only those within a specified maximum distance (bandwidth) from the boundary.
+    
+    Args:
+        points_gdf (gpd.GeoDataFrame): GeoDataFrame containing the Point geometries.
+        boundary_gdf (gpd.GeoDataFrame): GeoDataFrame containing the boundary geometries.
+        max_distance (float): Maximum distance threshold in meters.
+        unit_crs (int): EPSG code for metric distance calculation. Default is 3857.
+        
+    Returns:
+        gpd.GeoDataFrame: A filtered GeoDataFrame containing only the points within the distance threshold.
+    """
+    if boundary_gdf.empty:
+        return points_gdf.copy().iloc[0:0]
+
+    # Align CRS
+    boundary_gdf = _align_crs(points_gdf, boundary_gdf)
+
+    orig_crs = points_gdf.crs
+    pts = points_gdf.copy()
+    bds = boundary_gdf.copy()
+    if orig_crs:
+        pts = pts.to_crs(unit_crs)
+        bds = bds.to_crs(unit_crs)
+        
+    joined = gpd.sjoin_nearest(pts, bds, how='left', distance_col='temp_dist')
+    joined = joined[~joined.index.duplicated(keep='first')]
+    
+    mask = (joined['temp_dist'] <= max_distance) & (joined['temp_dist'].notna())
+    
+    return points_gdf[mask].copy()

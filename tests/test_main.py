@@ -10,7 +10,11 @@ from geoRDDprep import (
     turner,
     drop_tiny_lines,
     remove_sliver,
-    remove_overlaps
+    remove_overlaps,
+    calculate_signed_distance,
+    extract_shared_boundaries,
+    shift_boundary_placebo,
+    filter_by_boundary_distance
 )
 
 def test_points_in_polygon():
@@ -139,7 +143,7 @@ def test_remove_sliver_correctness():
         assert orig_id in res['id'].values
         
     # Check that they filled the gaps (total area should increase)
-    assert res.area.sum() > gdf_poly.area.sum()
+    assert res.to_crs(3857).area.sum() > gdf_poly.to_crs(3857).area.sum()
 
 
 def test_remove_overlaps():
@@ -186,3 +190,84 @@ def test_remove_sliver_custom_id_col():
     assert 'id' not in res.columns
     for cid in custom_ids:
         assert cid in res['district_id'].values
+
+
+def test_calculate_signed_distance():
+    # Treatment area
+    treatment = gpd.GeoDataFrame(
+        {'geometry': [Polygon([(0,0), (0,10), (10,10), (10,0)])]}, 
+        crs='EPSG:3857'
+    )
+    # Boundary between treatment and control
+    boundary = gpd.GeoDataFrame(
+        {'geometry': [LineString([(10, 0), (10, 10)])]}, 
+        crs='EPSG:3857'
+    )
+    # Points
+    points = gpd.GeoDataFrame(
+        {'id': [1, 2], 'geometry': [Point(5, 5), Point(15, 5)]},
+        crs='EPSG:3857'
+    )
+    
+    res = calculate_signed_distance(points, boundary, treatment)
+    
+    assert res.loc[res['id'] == 1, 'is_treated'].values[0] == True
+    assert res.loc[res['id'] == 2, 'is_treated'].values[0] == False
+    assert pytest.approx(res.loc[res['id'] == 1, 'distance'].values[0]) == 5.0
+    assert pytest.approx(res.loc[res['id'] == 2, 'distance'].values[0]) == 5.0
+    assert pytest.approx(res.loc[res['id'] == 1, 'signed_distance'].values[0]) == 5.0
+    assert pytest.approx(res.loc[res['id'] == 2, 'signed_distance'].values[0]) == -5.0
+
+
+def test_extract_shared_boundaries():
+    polys = [
+        Polygon([(0,0), (0,10), (10,10), (10,0)]),
+        Polygon([(10,0), (10,10), (20,10), (20,0)])
+    ]
+    gdf = gpd.GeoDataFrame({'district_id': [101, 102], 'geometry': polys}, crs='EPSG:3857')
+    
+    shared = extract_shared_boundaries(gdf, id_col='district_id')
+    
+    assert len(shared) == 1
+    row = shared.iloc[0]
+    # left_id and right_id are determined by index ordering, so left_id should be 101, right_id 102
+    assert row['left_id'] == 101
+    assert row['right_id'] == 102
+    
+    # The geometry should be a LineString along x=10
+    geom = row['geometry']
+    assert isinstance(geom, LineString)
+    assert geom.equals(LineString([(10, 0), (10, 10)])) or geom.equals(LineString([(10, 10), (10, 0)]))
+
+
+def test_shift_boundary_placebo():
+    boundary = gpd.GeoDataFrame(
+        {'geometry': [LineString([(0, 0), (10, 0)])]}, 
+        crs='EPSG:3857'
+    )
+    # Shift east by 5 meters, north by 10 meters
+    shifted = shift_boundary_placebo(boundary, xoff=5.0, yoff=10.0)
+    
+    assert len(shifted) == 1
+    geom = shifted['geometry'].iloc[0]
+    assert isinstance(geom, LineString)
+    assert geom.equals(LineString([(5, 10), (15, 10)]))
+
+
+def test_filter_by_boundary_distance():
+    boundary = gpd.GeoDataFrame(
+        {'geometry': [LineString([(10, 0), (10, 10)])]}, 
+        crs='EPSG:3857'
+    )
+    points = gpd.GeoDataFrame(
+        {'id': [1, 2, 3], 'geometry': [Point(8, 5), Point(12, 5), Point(20, 5)]},
+        crs='EPSG:3857'
+    )
+    
+    # Max distance = 5. Point 3 is 10 units away, so it should be filtered out
+    filtered = filter_by_boundary_distance(points, boundary, max_distance=5.0)
+    
+    assert len(filtered) == 2
+    assert 1 in filtered['id'].values
+    assert 2 in filtered['id'].values
+    assert 3 not in filtered['id'].values
