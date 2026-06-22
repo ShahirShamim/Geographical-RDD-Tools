@@ -6,12 +6,15 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from geoRDDprep import (
-    points_in_polygon, 
-    poly_to_line, 
-    turner, 
-    drop_tiny_lines, 
-    remove_sliver, 
-    remove_overlaps
+    points_in_polygon,
+    poly_to_line,
+    turner,
+    drop_tiny_lines,
+    remove_sliver,
+    remove_overlaps,
+    segment_boundary,
+    assign_nearest_boundary,
+    snap_points_to_boundary
 )
 
 def run_examples():
@@ -73,7 +76,33 @@ def run_examples():
     else:
         print("Line 1 was completely removed (full overlap).")
     print("\n")
-    
+
+    # 6. segment_boundary
+    print("--- 6. segment_boundary ---")
+    # Split the boundary lines into roughly 10 segments total (adaptive to data scale).
+    total_len_m = clean_lines.to_crs(3857).length.sum()
+    seg_len = max(total_len_m / 10.0, 1.0)
+    segments = segment_boundary(clean_lines, segment_length=seg_len)
+    print(f"Split {len(clean_lines)} boundary line(s) into {len(segments)} segments "
+          f"(target {seg_len:.0f} m each).")
+    print(f"First segment ids: {segments['segment_id'].tolist()[:10]}")
+    print("\n")
+
+    # 7. assign_nearest_boundary (boundary-segment fixed effects)
+    print("--- 7. assign_nearest_boundary ---")
+    # id_col names the source column to read; the value lands in 'boundary_id'.
+    pts_fe = assign_nearest_boundary(points, segments, id_col='segment_id')
+    print(f"Assigned each of {len(pts_fe)} points to its nearest boundary segment.")
+    print(pts_fe[['boundary_id', 'boundary_distance']].head(3))
+    print("\n")
+
+    # 8. snap_points_to_boundary
+    print("--- 8. snap_points_to_boundary ---")
+    snapped = snap_points_to_boundary(points, clean_lines, distance_col='dist_to_border')
+    print(f"Projected {len(snapped)} points onto the nearest boundary.")
+    print(snapped[['snapped_geometry', 'dist_to_border']].head(3))
+    print("\n")
+
     print("Examples completed successfully!")
 
 if __name__ == "__main__":
