@@ -1,6 +1,7 @@
 import geopandas as gpd
 import os
 import sys
+from shapely.geometry import box
 
 # Add parent directory to path to import geoRDDprep if running from source
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,6 +13,10 @@ from geoRDDprep import (
     drop_tiny_lines,
     remove_sliver,
     remove_overlaps,
+    calculate_signed_distance,
+    extract_shared_boundaries,
+    shift_boundary_placebo,
+    filter_by_boundary_distance,
     segment_boundary,
     assign_nearest_boundary,
     snap_points_to_boundary
@@ -101,6 +106,46 @@ def run_examples():
     snapped = snap_points_to_boundary(points, clean_lines, distance_col='dist_to_border')
     print(f"Projected {len(snapped)} points onto the nearest boundary.")
     print(snapped[['snapped_geometry', 'dist_to_border']].head(3))
+    print("\n")
+
+    # 9. remove_sliver
+    print("--- 9. remove_sliver ---")
+    # Clip to the polygon extent and merge any slivers/gaps into their neighbours.
+    minx, miny, maxx, maxy = polygons.total_bounds
+    clip = gpd.GeoDataFrame({'geometry': [box(minx, miny, maxx, maxy)]}, crs=polygons.crs)
+    cleaned_polys = remove_sliver(polygons, clip, id_col='id')
+    print(f"Cleaned {len(polygons)} polygons into {len(cleaned_polys)} (slivers/gaps merged).")
+    print("\n")
+
+    # 10. extract_shared_boundaries
+    print("--- 10. extract_shared_boundaries ---")
+    shared = extract_shared_boundaries(polygons, id_col='id')
+    print(f"Found {len(shared)} shared border(s) between adjacent districts.")
+    if not shared.empty:
+        print(shared[['left_id', 'right_id']].head())
+    print("\n")
+
+    # 11. calculate_signed_distance
+    print("--- 11. calculate_signed_distance ---")
+    # Treat district id==1 as the treated area; points inside get a positive distance.
+    treatment = polygons[polygons['id'] == 1]
+    signed = calculate_signed_distance(points, clean_lines, treatment)
+    print(f"Treated points: {int(signed['is_treated'].sum())} of {len(signed)}.")
+    print(signed[['is_treated', 'distance', 'signed_distance']].head(3))
+    print("\n")
+
+    # 12. filter_by_boundary_distance
+    print("--- 12. filter_by_boundary_distance ---")
+    # Keep only points within a 500 km bandwidth of the boundary.
+    nearby = filter_by_boundary_distance(points, clean_lines, max_distance=500000.0)
+    print(f"{len(nearby)} of {len(points)} points fall within the 500 km bandwidth.")
+    print("\n")
+
+    # 13. shift_boundary_placebo
+    print("--- 13. shift_boundary_placebo ---")
+    # Shift the boundary 100 km north to build a placebo border.
+    placebo = shift_boundary_placebo(clean_lines, xoff=0.0, yoff=100000.0)
+    print(f"Created a placebo boundary ({len(placebo)} segment(s)) shifted 100 km north.")
     print("\n")
 
     print("Examples completed successfully!")
