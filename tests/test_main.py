@@ -14,7 +14,10 @@ from geoRDDprep import (
     calculate_signed_distance,
     extract_shared_boundaries,
     shift_boundary_placebo,
-    filter_by_boundary_distance
+    filter_by_boundary_distance,
+    assign_nearest_boundary,
+    snap_points_to_boundary,
+    segment_boundary
 )
 
 def test_points_in_polygon():
@@ -266,8 +269,105 @@ def test_filter_by_boundary_distance():
     
     # Max distance = 5. Point 3 is 10 units away, so it should be filtered out
     filtered = filter_by_boundary_distance(points, boundary, max_distance=5.0)
-    
+
     assert len(filtered) == 2
     assert 1 in filtered['id'].values
     assert 2 in filtered['id'].values
     assert 3 not in filtered['id'].values
+
+
+def test_assign_nearest_boundary_with_id_col():
+    # Two vertical boundaries: 'L' at x=0, 'R' at x=20
+    bds = gpd.GeoDataFrame(
+        {'bid': ['L', 'R'], 'geometry': [LineString([(0, 0), (0, 10)]), LineString([(20, 0), (20, 10)])]},
+        crs='EPSG:3857'
+    )
+    pts = gpd.GeoDataFrame(
+        {'id': [1, 2], 'geometry': [Point(2, 5), Point(18, 5)]},
+        crs='EPSG:3857'
+    )
+
+    res = assign_nearest_boundary(pts, bds, id_col='bid')
+
+    assert res.loc[res['id'] == 1, 'boundary_id'].values[0] == 'L'
+    assert res.loc[res['id'] == 2, 'boundary_id'].values[0] == 'R'
+    assert pytest.approx(res.loc[res['id'] == 1, 'boundary_distance'].values[0]) == 2.0
+    assert pytest.approx(res.loc[res['id'] == 2, 'boundary_distance'].values[0]) == 2.0
+
+
+def test_assign_nearest_boundary_default_index():
+    # Without id_col, the boundary's index should be used as the identifier.
+    bds = gpd.GeoDataFrame(
+        {'geometry': [LineString([(0, 0), (0, 10)]), LineString([(20, 0), (20, 10)])]},
+        index=[100, 200], crs='EPSG:3857'
+    )
+    pts = gpd.GeoDataFrame(
+        {'id': [1, 2], 'geometry': [Point(2, 5), Point(18, 5)]},
+        crs='EPSG:3857'
+    )
+
+    res = assign_nearest_boundary(pts, bds)
+    assert res.loc[res['id'] == 1, 'boundary_id'].values[0] == 100
+    assert res.loc[res['id'] == 2, 'boundary_id'].values[0] == 200
+
+
+def test_snap_points_to_boundary():
+    bds = gpd.GeoDataFrame(
+        {'geometry': [LineString([(0, 0), (0, 10)])]}, crs='EPSG:3857'
+    )
+    pts = gpd.GeoDataFrame(
+        {'id': [1], 'geometry': [Point(3, 5)]}, crs='EPSG:3857'
+    )
+
+    res = snap_points_to_boundary(pts, bds, distance_col='snap_dist')
+
+    snapped = res['snapped_geometry'].iloc[0]
+    # Point (3, 5) projects onto the vertical line at (0, 5)
+    assert snapped.distance(Point(0, 5)) < 1e-6
+    assert pytest.approx(res['snap_dist'].iloc[0]) == 3.0
+    # Original geometry must be unchanged
+    assert res.geometry.iloc[0].equals(Point(3, 5))
+    assert res.crs == 'EPSG:3857'
+
+
+def test_segment_boundary():
+    bds = gpd.GeoDataFrame(
+        {'name': ['A'], 'geometry': [LineString([(0, 0), (100, 0)])]}, crs='EPSG:3857'
+    )
+    seg = segment_boundary(bds, segment_length=25.0)
+
+    # 100m line split into 4 equal 25m pieces
+    assert len(seg) == 4
+    assert 'segment_id' in seg.columns
+    assert seg['segment_id'].nunique() == 4
+    # Source attribute carried over
+    assert (seg['name'] == 'A').all()
+    # Lengths preserved overall and none exceeds the target
+    assert pytest.approx(seg.geometry.length.sum()) == 100.0
+    assert seg.geometry.length.max() <= 25.0 + 1e-6
+
+
+def test_segment_boundary_then_assign():
+    # Composition: segment a boundary then assign points to the nearest segment.
+    bds = gpd.GeoDataFrame(
+        {'geometry': [LineString([(0, 0), (100, 0)])]}, crs='EPSG:3857'
+    )
+    seg = segment_boundary(bds, segment_length=25.0)
+
+    pts = gpd.GeoDataFrame(
+        {'id': [1, 2], 'geometry': [Point(10, 1), Point(90, 1)]}, crs='EPSG:3857'
+    )
+    res = assign_nearest_boundary(pts, seg, id_col='segment_id')
+
+    # Point at x=10 falls on the first segment (x in [0, 25]); x=90 on the last (x in [75, 100])
+    seg_first = res.loc[res['id'] == 1, 'boundary_id'].values[0]
+    seg_last = res.loc[res['id'] == 2, 'boundary_id'].values[0]
+    assert seg_first == seg['segment_id'].min()
+    assert seg_last == seg['segment_id'].max()
+
+
+def test_segment_boundary_empty():
+    empty = gpd.GeoDataFrame({'geometry': []}, crs='EPSG:3857')
+    seg = segment_boundary(empty, segment_length=25.0)
+    assert len(seg) == 0
+    assert 'segment_id' in seg.columns

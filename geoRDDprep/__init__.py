@@ -8,3 +8,6 @@ from .main import calculate_signed_distance
 from .main import extract_shared_boundaries
 from .main import shift_boundary_placebo
 from .main import filter_by_boundary_distance
+from .main import assign_nearest_boundary
+from .main import snap_points_to_boundary
+from .main import segment_boundary

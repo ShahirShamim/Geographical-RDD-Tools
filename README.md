@@ -177,6 +177,60 @@ def filter_by_boundary_distance(
 *   **`max_distance`**: Maximum distance threshold (meters).
 *   **`unit_crs`** *(keyword-only)*: EPSG code for metric calculation. Default `3857`.
 
+### 11. `assign_nearest_boundary`
+Assigns each point to its nearest boundary feature, attaching the boundary's identifier and the metric distance. Pair it with `segment_boundary` to build **boundary-segment fixed effects**.
+```python
+def assign_nearest_boundary(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    *,
+    id_col: Optional[str] = None,
+    boundary_id_col: str = 'boundary_id',
+    distance_col: str = 'boundary_distance',
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame
+```
+*   **`points_gdf`**: Point geometries.
+*   **`boundary_gdf`**: Boundary geometries.
+*   **`id_col`** *(keyword-only)*: Column in `boundary_gdf` holding the identifier to attach. If `None`, the boundary index is used.
+*   **`boundary_id_col`** *(keyword-only)*: Output column for the boundary identifier. Default `'boundary_id'`.
+*   **`distance_col`** *(keyword-only)*: Output column for the distance to the nearest boundary (meters). Default `'boundary_distance'`.
+*   **`unit_crs`** *(keyword-only)*: EPSG code for metric calculation. Default `3857`.
+
+### 12. `snap_points_to_boundary`
+Projects each point onto its nearest boundary, returning the snapped (projected) point geometry. Useful for the "boundary point" RD approach and for visualization.
+```python
+def snap_points_to_boundary(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    *,
+    snapped_col: str = 'snapped_geometry',
+    distance_col: Optional[str] = None,
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame
+```
+*   **`points_gdf`**: Point geometries.
+*   **`boundary_gdf`**: Boundary geometries.
+*   **`snapped_col`** *(keyword-only)*: Output column for the projected `Point` geometries. Default `'snapped_geometry'`.
+*   **`distance_col`** *(keyword-only)*: If provided, also stores the distance from each point to its snapped location (meters).
+*   **`unit_crs`** *(keyword-only)*: EPSG code for metric calculation. Default `3857`.
+
+### 13. `segment_boundary`
+Splits boundary `LineString`s into consecutive equal-length segments (at most `segment_length` meters each), assigning a unique `segment_id`. The standard prep step for boundary-segment fixed effects.
+```python
+def segment_boundary(
+    boundary_gdf: gpd.GeoDataFrame,
+    segment_length: float,
+    *,
+    segment_id_col: str = 'segment_id',
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame
+```
+*   **`boundary_gdf`**: `LineString` boundary geometries.
+*   **`segment_length`**: Target maximum segment length (meters).
+*   **`segment_id_col`** *(keyword-only)*: Output column for the unique segment id. Default `'segment_id'`.
+*   **`unit_crs`** *(keyword-only)*: EPSG code used for length-based splitting. Default `3857`. Original (non-geometry) attributes of each source line are carried over to its segments.
+
 ---
 
 ## 🛠️ Usage Examples
@@ -249,6 +303,22 @@ rdd_sample = filter_by_boundary_distance(
 
 # 3. Create a placebo boundary shifted by 500 meters north
 placebo_boundary = shift_boundary_placebo(clean_lines, xoff=0.0, yoff=500.0)
+```
+
+### 5. Boundary-Segment Fixed Effects
+Split the border into local segments and tag each observation with the segment it sits closest to (Keele & Titiunik, 2015). You can also snap points onto the border for the "boundary point" approach.
+```python
+from geoRDDprep import segment_boundary, assign_nearest_boundary, snap_points_to_boundary
+
+# 1. Cut the boundary into ~1km segments, each with a unique segment_id
+segments = segment_boundary(clean_lines, segment_length=1000.0)
+
+# 2. Assign each point to its nearest segment (for segment fixed effects)
+points_fe = assign_nearest_boundary(points, segments, id_col='segment_id')
+print(points_fe[['segment_id', 'boundary_distance']].head())
+
+# 3. (Optional) Project points onto the border for boundary-point analysis
+snapped = snap_points_to_boundary(points, clean_lines, distance_col='dist_to_border')
 ```
 
 ---

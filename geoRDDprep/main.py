@@ -1,6 +1,7 @@
+import warnings
 import geopandas as gpd
 from shapely.geometry import LineString, Point, Polygon, MultiPolygon
-from shapely.ops import nearest_points, linemerge
+from shapely.ops import nearest_points, linemerge, substring
 import shapely
 from scipy.spatial import Voronoi, ConvexHull
 import numpy as np
@@ -12,7 +13,6 @@ def _align_crs(gdf1: gpd.GeoDataFrame, gdf2: gpd.GeoDataFrame) -> gpd.GeoDataFra
     if gdf1.crs is None or gdf2.crs is None:
         return gdf2
     if gdf1.crs != gdf2.crs:
-        import warnings
         warnings.warn(
             f"CRS mismatch: reprojecting second GeoDataFrame from {gdf2.crs} to {gdf1.crs}.",
             UserWarning
@@ -146,10 +146,11 @@ def turner(
     op2 = shapely.points(op2_x, op2_y)
     
     # Element-wise distance check
+    boundary_geoms = df_n["geometry_y"].values
     pass1 = np.zeros(len(df_n), dtype=bool)
     pass2 = np.zeros(len(df_n), dtype=bool)
-    pass1[valid] = shapely.distance(df_n["geometry_y"].values[valid], op1[valid]) < 1e-6
-    pass2[valid] = shapely.distance(df_n["geometry_y"].values[valid], op2[valid]) < 1e-6
+    pass1[valid] = shapely.distance(boundary_geoms[valid], op1[valid]) < 1e-6
+    pass2[valid] = shapely.distance(boundary_geoms[valid], op2[valid]) < 1e-6
     
     df_n['turner_pass'] = pass1 & pass2
     
@@ -575,7 +576,209 @@ def filter_by_boundary_distance(
         
     joined = gpd.sjoin_nearest(pts, bds, how='left', distance_col='temp_dist')
     joined = joined[~joined.index.duplicated(keep='first')]
-    
+
     mask = (joined['temp_dist'] <= max_distance) & (joined['temp_dist'].notna())
-    
+
     return points_gdf[mask].copy()
+
+def assign_nearest_boundary(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    *,
+    id_col: Optional[str] = None,
+    boundary_id_col: str = 'boundary_id',
+    distance_col: str = 'boundary_distance',
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame:
+    """
+    Assigns each point to its nearest boundary feature, attaching the boundary's
+    identifier and the metric distance to it.
+
+    This is the building block for boundary-segment fixed effects in GeoRDD: when
+    there are multiple boundary segments (e.g. the output of ``segment_boundary``),
+    each observation can be tagged with the segment it is closest to.
+
+    Args:
+        points_gdf (gpd.GeoDataFrame): GeoDataFrame containing the Point geometries.
+        boundary_gdf (gpd.GeoDataFrame): GeoDataFrame containing the boundary geometries.
+        id_col (str, optional): Column in ``boundary_gdf`` holding the identifier to
+                                attach. If None, the boundary's index is used.
+        boundary_id_col (str): Name of the output column for the boundary identifier.
+                               Default is 'boundary_id'.
+        distance_col (str): Name of the output column for the distance to the nearest
+                            boundary (in meters). Default is 'boundary_distance'.
+        unit_crs (int): EPSG code for metric distance calculation. Default is 3857.
+
+    Returns:
+        gpd.GeoDataFrame: A copy of points_gdf with the boundary identifier and distance
+                          columns added (in the original CRS).
+    """
+    if boundary_gdf.empty:
+        raise ValueError("boundary_gdf cannot be empty.")
+
+    boundary_gdf = _align_crs(points_gdf, boundary_gdf)
+
+    orig_crs = points_gdf.crs
+    pts = points_gdf.copy()
+    bds = boundary_gdf.copy()
+    if orig_crs:
+        pts = pts.to_crs(unit_crs)
+        bds = bds.to_crs(unit_crs)
+
+    # Reset to a clean positional index so 'index_right' can be mapped reliably.
+    bds_reset = bds.reset_index(drop=True)
+    if id_col is not None:
+        bid_values = bds_reset[id_col].values
+    else:
+        bid_values = boundary_gdf.index.values
+
+    joined = gpd.sjoin_nearest(pts, bds_reset, how='left', distance_col=distance_col)
+    joined = joined[~joined.index.duplicated(keep='first')]
+
+    res = points_gdf.copy()
+    res[distance_col] = joined[distance_col]
+
+    idx_right = joined['index_right']
+    mapped = pd.Series(np.nan, index=joined.index, dtype=object)
+    ok = idx_right.notna()
+    mapped.loc[ok] = bid_values[idx_right[ok].astype(int).values]
+    res[boundary_id_col] = mapped
+
+    return res
+
+def snap_points_to_boundary(
+    points_gdf: gpd.GeoDataFrame,
+    boundary_gdf: gpd.GeoDataFrame,
+    *,
+    snapped_col: str = 'snapped_geometry',
+    distance_col: Optional[str] = None,
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame:
+    """
+    Projects each point onto its nearest boundary, returning the snapped (projected)
+    point geometry. Useful for the "boundary point" RD approach and for visualizing
+    which part of the border each observation maps to.
+
+    Args:
+        points_gdf (gpd.GeoDataFrame): GeoDataFrame containing the Point geometries.
+        boundary_gdf (gpd.GeoDataFrame): GeoDataFrame containing the boundary geometries.
+        snapped_col (str): Name of the output column holding the projected Point
+                           geometries. Default is 'snapped_geometry'.
+        distance_col (str, optional): If provided, also store the distance from each
+                                      point to its snapped location (in meters).
+        unit_crs (int): EPSG code for metric distance calculation. Default is 3857.
+
+    Returns:
+        gpd.GeoDataFrame: A copy of points_gdf with the snapped geometry column added.
+                          The active geometry remains the original points; the snapped
+                          geometries are returned in the original CRS.
+    """
+    if boundary_gdf.empty:
+        raise ValueError("boundary_gdf cannot be empty.")
+
+    boundary_gdf = _align_crs(points_gdf, boundary_gdf)
+
+    orig_crs = points_gdf.crs
+    pts = points_gdf.copy()
+    bds = boundary_gdf.copy()
+    if orig_crs:
+        pts = pts.to_crs(unit_crs)
+        bds = bds.to_crs(unit_crs)
+
+    bds_reset = bds.reset_index(drop=True)
+    joined = gpd.sjoin_nearest(pts, bds_reset, how='left', distance_col='_snap_dist')
+    joined = joined[~joined.index.duplicated(keep='first')]
+
+    matched_geom = bds_reset.geometry.values[joined['index_right'].astype(int).values]
+    point_geom = joined.geometry.values
+
+    # The shortest line runs point -> boundary; its second coordinate is the
+    # projected location on the boundary.
+    lines = shapely.shortest_line(point_geom, matched_geom)
+    coords = shapely.get_coordinates(lines)
+    snapped_pts = shapely.points(coords[1::2])
+
+    snapped_series = gpd.GeoSeries(
+        snapped_pts, index=joined.index, crs=unit_crs if orig_crs else None
+    )
+    if orig_crs:
+        snapped_series = snapped_series.to_crs(orig_crs)
+
+    res = points_gdf.copy()
+    res[snapped_col] = snapped_series
+    if distance_col is not None:
+        res[distance_col] = joined['_snap_dist']
+
+    return res
+
+def segment_boundary(
+    boundary_gdf: gpd.GeoDataFrame,
+    segment_length: float,
+    *,
+    segment_id_col: str = 'segment_id',
+    unit_crs: int = 3857
+) -> gpd.GeoDataFrame:
+    """
+    Splits boundary LineStrings into consecutive segments of approximately equal
+    length (at most ``segment_length`` meters each). Each output segment receives a
+    unique identifier, enabling boundary-segment fixed effects in GeoRDD analysis.
+
+    Each line is divided into ``ceil(length / segment_length)`` equal pieces, so the
+    pieces of a given line are all the same length and never exceed ``segment_length``.
+    Original (non-geometry) attributes of each source line are carried over to its
+    segments.
+
+    Args:
+        boundary_gdf (gpd.GeoDataFrame): GeoDataFrame containing LineString geometries.
+        segment_length (float): Target maximum segment length in meters.
+        segment_id_col (str): Name of the output column for the unique segment id.
+                              Default is 'segment_id'.
+        unit_crs (int): EPSG code used for length-based splitting when the input is
+                        geographic. Default is 3857.
+
+    Returns:
+        gpd.GeoDataFrame: A GeoDataFrame of segment LineStrings (in the original CRS)
+                          with a unique ``segment_id_col`` column.
+    """
+    if segment_length <= 0:
+        raise ValueError("segment_length must be a positive number.")
+
+    orig_crs = boundary_gdf.crs
+    bds = boundary_gdf[boundary_gdf.geometry.geom_type == 'LineString'].copy()
+    if bds.empty:
+        return gpd.GeoDataFrame(columns=[segment_id_col, 'geometry'], crs=orig_crs)
+
+    # Split using metric lengths; reproject only when the CRS is geographic.
+    if orig_crs is not None and not orig_crs.is_projected:
+        work = bds.to_crs(unit_crs)
+    else:
+        work = bds
+
+    work_reset = work.reset_index(drop=True)
+    attr_cols = [c for c in work_reset.columns if c != 'geometry']
+
+    records = []
+    for pos, geom in enumerate(work_reset.geometry.values):
+        if geom is None or geom.is_empty:
+            continue
+        total = geom.length
+        if total == 0:
+            continue
+        n = max(1, int(np.ceil(total / segment_length)))
+        cuts = np.linspace(0.0, total, n + 1)
+        base = {c: work_reset.iloc[pos][c] for c in attr_cols}
+        for i in range(n):
+            sub = substring(geom, cuts[i], cuts[i + 1])
+            if sub.is_empty:
+                continue
+            rec = dict(base)
+            rec['geometry'] = sub
+            records.append(rec)
+
+    seg_gdf = gpd.GeoDataFrame(records, crs=work.crs)
+    seg_gdf.insert(0, segment_id_col, np.arange(len(seg_gdf)))
+
+    if orig_crs is not None and not orig_crs.is_projected:
+        seg_gdf = seg_gdf.to_crs(orig_crs)
+
+    return seg_gdf
